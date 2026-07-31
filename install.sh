@@ -46,15 +46,19 @@ if [ "$WITH_CLAUDEMD" -eq 1 ]; then
     cat >> "$CLAUDEMD" <<'STANZA'
 
 # boink
-- **boink** (`~/.claude/skills/boink/SKILL.md`) — passive anti-stall watchdog.
-  ALWAYS ACTIVE, no invocation needed. Whenever you create a semantic monitor
-  (Monitor tool, background wait, poll loop, CI/build/deploy watch, or any turn
-  ending in "I'll check back when…"), immediately arm a recurring BOINK via
-  `CronCreate(cron: "2-59/5 * * * *", prompt: "BOINK", recurring: true)` — one
-  per session, check `CronList` first. On each BOINK, follow the protocol in
-  SKILL.md: re-observe with a fresh command, never answer from memory, classify
-  (PROGRESSING / DONE / STALLED / DEAD / MONITOR-BROKEN), act, then recount and
-  `CronDelete` if zero semantic monitors remain.
+- **boink** (`~/.claude/skills/boink/SKILL.md`) — passive anti-stall watchdog +
+  session garbage collector. ALWAYS ACTIVE, no invocation needed. Whenever you
+  create a semantic monitor (Monitor tool, background wait, poll loop,
+  CI/build/deploy watch, or any turn ending in "I'll check back when…"),
+  immediately arm a recurring BOINK via `CronCreate(cron: "2-59/5 * * * *",
+  prompt: "BOINK", recurring: true)` — one per session, check `CronList` first.
+  On each BOINK, follow the protocol in SKILL.md: never answer from memory;
+  sweep session state (`TaskList`, `CronList`) and re-observe the watched thing
+  with a fresh command; harvest output BEFORE reaping dead shells, monitors,
+  agents, task entries and cron jobs (never reap what isn't yours, is still
+  running, or is unharvested — report those and ask); classify (PROGRESSING /
+  DONE / STALLED / DEAD / MONITOR-BROKEN); act; then recount the *live* monitors
+  and `CronDelete` the BOINK if zero remain.
 STANZA
     echo "wrote   boink stanza appended to $CLAUDEMD"
   fi

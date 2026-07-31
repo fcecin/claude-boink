@@ -1,6 +1,7 @@
 # claude-boink
 
-**A timeout for every monitor Claude ever creates.**
+**A timeout for every monitor Claude ever creates — and a garbage collector for
+everything a live session leaves behind.**
 
 `BOINK` is a passive, always-on Claude Code skill. It needs no invocation. The
 moment Claude creates a semantic monitor — a `Monitor` task, a background build,
@@ -74,8 +75,8 @@ single BOINK; each firing sweeps all of them.
 `:30` marks that every scheduler on the planet piles onto.)*
 
 On each arrival, Claude runs a six-step protocol: **don't answer from memory →
-re-observe with a fresh command → diff against the last BOINK → classify →
-act → recount and disarm if empty.**
+sweep and re-observe → diff against the last BOINK → classify → act → recount
+and disarm if empty.**
 
 The classification commits to one word, no hedging:
 
@@ -98,6 +99,47 @@ every step and globally catastrophic.
 
 Step six is what terminates the loop — every BOINK is also a refcount check, so
 the mechanism that fires it is the same one that notices it's no longer needed.
+
+## The sweep
+
+A long session silts up. Background shells finish and are never collected.
+Monitors time out (the default is **five minutes** — about one BOINK) or get
+auto-stopped for event volume, silently. Agents deliver and linger. Task entries
+sit `in_progress` for hours after the work landed, or stay blocked by tasks that
+no longer exist. Cron jobs outlive what they were watching. Processes get
+orphaned, temp files pile up.
+
+None of it is individually alarming, which is exactly why it accumulates — and
+the cost is mechanical, not cosmetic: **a dead monitor still counts toward the
+refcount.** Count corpses and the BOINK never disarms. So the reaper isn't
+housekeeping bolted onto the watchdog; it's what makes the watchdog terminate.
+
+It rides along for free, because steps 2 and 6 already enumerate session state.
+The sweep is the same pass with the dead things removed on the way through.
+
+**The cardinal rule is harvest before reap.** A finished background shell isn't
+garbage — it's the result you spent an hour waiting for, sitting in a buffer.
+Reap it first and you've deleted the answer while keeping the question. Read,
+use, *then* clear.
+
+Swept: background shells · monitors · agents and teammates · task-list entries ·
+stale `blockedBy` edges · cron jobs · orphaned processes · scratchpad temp files.
+
+Reaping is tiered, because the asymmetry between a missed corpse and a wrong kill
+is total:
+
+| Tier | What | Action |
+| --- | --- | --- |
+| 🟢 **Green** | Yours, provably finished, already harvested | Reap silently, note in the tally |
+| 🟡 **Amber** | Yours, almost certainly finished, but it's your judgement | Reap, say so in one clause |
+| 🔴 **Red** | Not yours · still running · unharvested · outside the scratchpad · another agent's | **Never auto-reap.** Report and ask |
+
+No `pkill` by pattern, ever — a bare `pkill node` takes out the user's editor,
+dev server, and half their desktop. Reap named things you created; when in doubt
+it's Red.
+
+And the sweep is strictly secondary: if the BOINK line doesn't say what the
+watched thing is *doing*, a tidy inventory means nothing.
 
 ## Install
 
@@ -123,15 +165,19 @@ relevant. For a passive ability that should never be missed, add a stanza to
 
 ```markdown
 # boink
-- **boink** (`~/.claude/skills/boink/SKILL.md`) — passive anti-stall watchdog.
-  ALWAYS ACTIVE, no invocation needed. Whenever you create a semantic monitor
-  (Monitor tool, background wait, poll loop, CI/build/deploy watch, or any turn
-  ending in "I'll check back when…"), immediately arm a recurring BOINK via
-  `CronCreate(cron: "2-59/5 * * * *", prompt: "BOINK", recurring: true)` — one
-  per session, check `CronList` first. On each BOINK, follow the protocol in
-  SKILL.md: re-observe with a fresh command, never answer from memory, classify
-  (PROGRESSING / DONE / STALLED / DEAD / MONITOR-BROKEN), act, then recount and
-  `CronDelete` if zero semantic monitors remain.
+- **boink** (`~/.claude/skills/boink/SKILL.md`) — passive anti-stall watchdog +
+  session garbage collector. ALWAYS ACTIVE, no invocation needed. Whenever you
+  create a semantic monitor (Monitor tool, background wait, poll loop,
+  CI/build/deploy watch, or any turn ending in "I'll check back when…"),
+  immediately arm a recurring BOINK via `CronCreate(cron: "2-59/5 * * * *",
+  prompt: "BOINK", recurring: true)` — one per session, check `CronList` first.
+  On each BOINK, follow the protocol in SKILL.md: never answer from memory;
+  sweep session state (`TaskList`, `CronList`) and re-observe the watched thing
+  with a fresh command; harvest output BEFORE reaping dead shells, monitors,
+  agents, task entries and cron jobs (never reap what isn't yours, is still
+  running, or is unharvested — report those and ask); classify (PROGRESSING /
+  DONE / STALLED / DEAD / MONITOR-BROKEN); act; then recount the *live* monitors
+  and `CronDelete` the BOINK if zero remain.
 ```
 
 `install.sh --claudemd` appends this for you if it isn't already there.
@@ -146,6 +192,7 @@ The ability is automatic; these exist for steering it.
 | `/boink 15m` | Re-arm at a different interval. |
 | `/boink --loud` | Re-arm with a self-describing prompt (survives context compaction). |
 | `/boink status` | What's armed, and what's being watched. |
+| `/boink sweep` | Run the sweep once now, without waiting for a BOINK. |
 | `/boink off` | Disarm and stand down for this session. |
 
 ## Limits

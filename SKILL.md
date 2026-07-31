@@ -1,6 +1,6 @@
 ---
 name: boink
-description: "ALWAYS ACTIVE — passive ability, no invocation needed. The timeout every monitor should have had. Whenever you create a semantic monitor (Monitor tool, background wait, poll loop, CI/deploy/build watch, 'I'll check back when X'), also arm a recurring BOINK: a contentless prompt injected every 5 minutes while the REPL is idle and at least one semantic monitor is still active. Each BOINK forces a fresh, evidence-based re-observation, so monitors that silently died, filters that can never match, and conditions that were already met an hour ago get caught instead of hanging forever. Disarms only when zero semantic monitors remain."
+description: "ALWAYS ACTIVE — passive ability, no invocation needed. The timeout every monitor should have had, plus the garbage collector a live session never had. Whenever you create a semantic monitor (Monitor tool, background wait, poll loop, CI/deploy/build watch, 'I'll check back when X'), also arm a recurring BOINK: a contentless prompt injected every 5 minutes while the REPL is idle and at least one semantic monitor is still active. Each BOINK forces a fresh, evidence-based re-observation AND a sweep that harvests then reaps everything accumulating in the session — dead background shells, dead monitors, finished agents and teammates, stale task-list entries, orphaned cron jobs, leaked processes and temp files. Catches monitors that silently died, filters that can never match, and conditions met an hour ago, instead of hanging forever. Disarms only when zero live semantic monitors remain."
 ---
 
 # BOINK
@@ -120,6 +120,9 @@ on you finishing your work.
 - Work that completes inside this turn
 - A background task you have already collected the result of
 - A monitor you armed and then stopped
+- **A dead monitor, shell, or agent that is still listed.** A corpse is not a
+  monitor. Keeping this distinction honest is the entire job of
+  [the sweep](#the-sweep) — count the live ones, or the BOINK never stops.
 
 The test: *if I stop typing, is there something I am expecting to hear about
 later?* If yes, that is a semantic monitor, and the BOINK stays armed.
@@ -188,9 +191,17 @@ this belief the BOINK exists to challenge.
 If your answer could have been written *before* the BOINK arrived, you have not
 done the protocol.
 
-### 2. Re-observe with a fresh command
+### 2. Sweep and re-observe
 
 Run something. Right now. Look at the world, not at your notes.
+
+Start with the session inventory — `TaskList` and `CronList` — because *is my
+monitor still armed at all?* is the cheapest question with the highest yield.
+This same enumeration is the **sweep**: one pass over session state, where what
+is alive feeds your classification and what is dead gets reaped. See
+[The sweep](#the-sweep) for the full inventory and the reaping rules.
+
+Then look at the specific thing you are waiting on:
 
 ```bash
 ps -p "$PID" -o pid,etime,stat,%cpu,cmd   # is the process even alive?
@@ -200,8 +211,6 @@ gh run view "$RUN_ID"                      # what does the remote actually think
 curl -sS -o /dev/null -w '%{http_code}' "$URL"
 ls -la --time-style=full-iso out/
 ```
-
-Plus `TaskList` — *is my monitor still armed at all?*
 
 Two of these are worth more than the rest combined:
 
@@ -257,9 +266,15 @@ that is broken. Look for them first, and hardest.
 
 This is the step that terminates the loop, and the easiest one to forget.
 
-After acting, ask: **are there any semantic monitors left?** If the answer is
-zero, `CronDelete` the BOINK now, in this same turn. If one or more remain, it
+After acting, ask: **are there any *live* semantic monitors left?** If the answer
+is zero, `CronDelete` the BOINK now, in this same turn. If one or more remain, it
 stays armed and you say nothing about it.
+
+The word *live* is doing real work, and it is why the sweep is not optional
+housekeeping. **A dead monitor still appears in the inventory.** If you count
+corpses, the count never reaches zero, and the BOINK keeps firing for seven days
+over work that finished this morning. The reap in step 2 is what makes the
+refcount converge.
 
 Every BOINK is therefore also a refcount check. That is why the BOINK cannot leak
 indefinitely: the mechanism that fires it is the same mechanism that notices it
@@ -276,6 +291,118 @@ Short, factual, with a number in it:
 > BOINK — MONITOR-BROKEN. Task `m_4f2` is gone from TaskList; it hit its 300s timeout 22 min ago. The build is still running (pid 8871, 6% CPU). Re-arming with `persistent: true`. BOINK stays armed.
 
 > BOINK — STALLED (3 consecutive). `build.log` unchanged at 812 lines since 14:07, pid 8871 alive at 0.0% CPU, no open sockets. This is not slow, it is stuck. Recommend killing it and re-running with `-v`.
+
+## The sweep
+
+A long session silts up. Background shells finish and are never collected.
+Monitors time out, or get auto-stopped for volume, and nobody notices. Agents
+deliver their work and linger. Task-list entries sit `in_progress` for hours
+after the work landed, or stay blocked by tasks that no longer exist. Cron jobs
+outlive the thing they were watching. Processes get orphaned, temp files pile up.
+
+None of this is individually alarming, which is exactly why it accumulates. The
+cost shows up later: an inventory so full of corpses you cannot see what is
+actually running, and — specifically, mechanically — **a refcount that never
+reaches zero, so the BOINK never disarms.**
+
+The BOINK is the natural place to fix this because it is already doing the
+enumeration. Steps 2 and 6 walk session state anyway. The sweep is not a second
+pass; it is the same pass, with the dead things removed on the way through.
+
+### The cardinal rule: harvest before reap
+
+**Never reap anything whose output you have not already collected.**
+
+A finished background shell is not garbage. It is *the result you were waiting
+for*, sitting in a buffer. Reaping it first destroys the evidence and converts a
+clean **DONE** into a permanent mystery — you will know the job ended and never
+know how.
+
+So the order is always: **read it, use it, then clear it.**
+
+```
+Read(<output file path from the task result>)   # harvest
+TaskStop(task_id: "…")                          # then reap
+```
+
+`TaskOutput` is deprecated; `Read` the output file path the task returned. Never
+`Read` the `.output` of a `local_agent` task — it is a symlink to the full
+subagent transcript and will flood your context. Use the Agent result instead.
+
+### Inventory
+
+| What | Dead when | Harvest | Then |
+| --- | --- | --- | --- |
+| **Background shell** (`Bash run_in_background`) | Exited — completion notification arrived, or it is gone from `TaskList` | `Read` its output file | `TaskStop` if still listed |
+| **Monitor** | Timed out (default 300 s!), auto-stopped for event volume, watching a dead PID, or tailing a rotated inode | `Read` its output file for anything stderr swallowed | `TaskStop`; re-arm *corrected* if still needed |
+| **Agent / teammate** | Returned its result, or has been idle with nothing assigned | Use the Agent result you already got | `TaskStop(task_id: "<name>")` or `"<name>@<team>"` |
+| **Task-list entry** | Work is done, or it was superseded by a pivot | — | `TaskUpdate` → `completed` (done) or `deleted` (never real) |
+| **Blocked task** | Its `blockedBy` names tasks that are completed or deleted | — | Clear the dependency, or delete if moot |
+| **Cron job** | Duplicate BOINK, or watching finished work | `CronList` to see them all | `CronDelete` |
+| **OS process** | You spawned it, its parent is gone, it is doing nothing | `ps`, last log lines | `kill` — see the red tier first |
+| **Temp file** | In *your* scratchpad, from work that finished | Anything you still need | `rm` |
+
+A few of these deserve emphasis:
+
+- **Monitors default to a 300 000 ms timeout — five minutes.** Roughly one BOINK
+  interval. Unless you passed `persistent: true`, assume any monitor older than a
+  couple of BOINKs is already dead, and check rather than trust it.
+- **Monitors that emit too much are stopped automatically.** This is a silent
+  death: you get no notification that watching has ceased. A monitor that was
+  chatty and then went quiet is a prime suspect, not a reassurance.
+- **`completed` and `deleted` are not interchangeable** on task entries.
+  `completed` preserves the record of work that happened; `deleted` erases it
+  permanently. Use `deleted` only for entries created in error.
+
+### Three tiers
+
+Reap aggressively where it is provably safe, and nowhere else.
+
+**Green — reap silently, mention only in the tally.**
+Things that are yours, provably finished, and already harvested: collected
+background shells, monitors confirmed gone from `TaskList`, task entries whose
+work demonstrably landed, duplicate or orphaned BOINKs, your own scratchpad
+files from finished work.
+
+**Amber — reap, and say so in one clause.**
+Things that are yours and almost certainly finished, but where the judgement is
+yours rather than the system's: a monitor watching a PID that no longer exists,
+an agent idle since it delivered, tasks superseded by a change of direction, a
+`persistent` monitor whose subject completed. Name what you reaped and why.
+
+**Red — never auto-reap. Report and ask.**
+- Anything you did not create in this session.
+- Anything still running that you cannot prove is finished.
+- Any process outside your own spawns — never `pkill` by name or pattern; a bare
+  `pkill node` will take out the user's editor, dev server, and half their
+  desktop.
+- User files, project files, anything outside the scratchpad. `rm` targets are
+  paths you created, never globs you inferred.
+- Anything whose output you have not read.
+- Another agent's tasks, monitors, or crons.
+
+When in doubt it is Red. An uncollected corpse costs one line of inventory
+noise; a wrong reap can destroy the run you were monitoring, or the user's
+unrelated work. **The asymmetry is total, so the bias is total: leave it.**
+
+### Reporting the sweep
+
+The sweep is secondary to the status check and must never crowd it out. A BOINK
+that reports beautiful housekeeping and forgets to say whether the build is alive
+has failed.
+
+If nothing was reaped, **say nothing about it.** Silence is the correct report
+for an empty sweep.
+
+If something was, append one clause to the BOINK line:
+
+> BOINK — PROGRESSING. `run.log` 4,182 → 4,610 lines, mtime 14s ago, pid 3312 alive. Step 41/120. Swept: 2 finished shells (harvested), 1 timed-out monitor, 3 completed task entries. 1 monitor live.
+
+> BOINK — DONE. `deploy.log` line 88 reads `rollout complete`, 6 min ago; the monitor's filter wanted `"Ready in"` and never matched. Swept: stopped the stale monitor, closed tasks 4–7, deleted the duplicate BOINK. Zero monitors left — disarming.
+
+Anything in the Red tier gets stated plainly and left alone:
+
+> Also: 3 orphaned `node` processes from an earlier run (pids 4471, 4488, 4502), parent gone, ~0% CPU. Not mine to reap on my own — want me to kill them?
 
 ## The escalation ladder
 
@@ -353,6 +480,22 @@ the BOINK is the unkillable slow one.
 
 **Leaving it armed with nothing to watch.** Step 6 exists. Run it.
 
+**Reaping before harvesting.** Stopping a finished background shell before
+reading its output destroys the result you spent an hour waiting for. Worse, a
+finished shell is usually *the* **DONE** signal — reap it first and you have
+deleted the answer while keeping the question. Read, then clear. Always.
+
+**Counting corpses.** A dead monitor still shows up in the inventory. Refcount
+the *live* ones, or the BOINK outlives the work by seven days.
+
+**Reaping by pattern.** `pkill -f node`, `rm -rf` on an inferred glob, stopping
+every task in the list because most of them looked done. Reap named things you
+created; everything else is Red tier.
+
+**Letting the sweep eat the report.** A tidy inventory is not a status. If the
+BOINK line does not say what the watched thing is doing, the sweep was a
+distraction.
+
 ## Limits — know these before relying on it
 
 - **Session-only.** Cron jobs live in memory in this session and do not survive a
@@ -379,7 +522,8 @@ The ability is automatic; these exist for when the user wants to steer it.
 | `/boink` | Arm now, even if no monitor is currently active. |
 | `/boink 15m` | Re-arm at a different interval (`7-59/15`). |
 | `/boink --loud` | Re-arm with the self-describing prompt. |
-| `/boink status` | `CronList` plus the current set of semantic monitors. |
+| `/boink status` | `CronList` plus the current set of live semantic monitors. |
+| `/boink sweep` | Run the sweep once, right now, without waiting for a BOINK. |
 | `/boink off` | `CronDelete` every armed BOINK, and stand down for this session. |
 
 `/boink off` is the only thing that suppresses the passive behaviour, and only
